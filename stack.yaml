@@ -1,0 +1,12 @@
+resolver: lts-9.1
+
+packages:
+- '.'
+
+extra-deps:
+- QuickCheck-2.10
+- universum-0.7.1.1
+
+flags: {}
+
+extra-package-dbs: []

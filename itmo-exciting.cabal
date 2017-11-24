@@ -1,0 +1,42 @@
+name:                itmo-exciting
+version:             0.1.0.0
+description:         Verious fun stuff
+license:             BSD3
+license-file:        LICENSE
+author:              Konstantin Ivanov
+maintainer:          martoon.hsk@gmail.com
+copyright:           2017 K. Ivanov
+category:            Web
+build-type:          Simple
+extra-source-files:  README.md
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     ProbabolisticPrograms
+  build-depends:       base >= 4.7 && < 5
+                     , Chart
+                     , Chart-diagrams
+                     , QuickCheck
+                     , universum
+  default-language:    Haskell2010
+  default-extensions:  FlexibleContexts
+                       FlexibleInstances
+                       OverloadedStrings
+                       TypeOperators
+                       ConstraintKinds
+                       LambdaCase
+                       MultiParamTypeClasses
+                       MultiWayIf
+                       NoImplicitPrelude
+                       OverloadedStrings
+                       ScopedTypeVariables
+                       TupleSections
+                       TypeApplications
+                       TypeOperators
+                       RecordWildCards
+                       ViewPatterns
+                       ExplicitForAll
+                       DeriveGeneric
+  ghc-options:         -Wall
+
