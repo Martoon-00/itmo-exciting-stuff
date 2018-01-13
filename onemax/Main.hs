@@ -6,7 +6,7 @@
 
 module Main where
 
-import           Control.Monad         (forM, forM_, replicateM, void)
+import           Control.Monad         (forM, forM_, void)
 import           Data.Bifunctor        (first, second)
 import           Data.IORef            (IORef, newIORef, readIORef, writeIORef)
 import           Data.List             (group, sort)
@@ -14,7 +14,6 @@ import           Data.Maybe            (catMaybes)
 import           GHC.IO.Unsafe         (unsafePerformIO)
 import           Prelude               hiding (interact)
 import           System.IO             (hClose, hFlush, stdin, stdout)
-import           System.Random         (randomRIO)
 
 import qualified Control.Monad.ST.Lazy as ST
 import qualified Data.Array            as A
