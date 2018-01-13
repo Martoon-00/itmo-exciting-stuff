@@ -46,9 +46,10 @@ executable OneMax
   main-is:             Main.hs
   build-depends:       base,
                        array,
+                       containers,
                        vector,
                        random
   default-language:    Haskell2010
-  ghc-options:         -Wall
+  ghc-options:         -Wall -prof -fprof-auto -rtsopts
 
 

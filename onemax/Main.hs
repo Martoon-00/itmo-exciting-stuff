@@ -6,15 +6,20 @@
 module Main where
 
 import           Control.Monad         (forM, forM_, replicateM, void)
+import           Data.IORef            (IORef, newIORef, readIORef, writeIORef)
 import           Data.List             (group, sort)
+import           Data.Word             (Word16)
+import           GHC.IO.Unsafe         (unsafePerformIO)
 import           Prelude               hiding (interact)
 import           System.IO             (hClose, hFlush, stdin, stdout)
+import           System.Random         (randomRIO)
 
-import           Control.Monad.ST.Lazy as ST
+import qualified Control.Monad.ST.Lazy as ST
 import qualified Data.Array            as A
 import qualified Data.Array.IO.Safe    as A
 import qualified Data.Array.ST.Safe    as A
 import qualified Data.Bits             as B
+import qualified Data.Map              as M
 
 import           Debug.Trace
 
@@ -23,6 +28,10 @@ main = interact $ map (unwords . map show) . process . map read . words
   where
     process (n:fs) = solve n fs
     process _      = error "not enought input"
+
+-- For profiling
+-- main :: IO ()
+-- main = test solve =<< replicateM 100000 (randomRIO (0, 1))
 
 interact :: (String -> [String]) -> IO ()
 interact f = do
@@ -38,11 +47,14 @@ type InputOutput = [Fitness] -> [Flips]
 random :: Seed -> (Seed, Int)
 random s = (s * 99139) `divMod` 95279
 
-randomListR :: Enum a => Seed -> (a, a) -> [a]
-randomListR s (l, r) =
+dropSeed :: (Seed, a) -> a
+dropSeed = snd
+
+randomR :: Enum a => Seed -> (a, a) -> (Seed, a)
+randomR s (l, r) =
     let (s', g) = random s
         i = (g `mod` (fromEnum r - fromEnum l + 1)) + fromEnum l
-    in  toEnum i : randomListR s' (l, r)
+    in  (s', toEnum i)
 
 shuffle :: Seed -> [a] -> A.Array Int a
 shuffle seed content = A.runSTArray $ do
@@ -75,7 +87,7 @@ addToNext f' []     = [f']
 
 -- | Helper for safe requests
 request :: Flips -> (Fitness -> InputOutput) -> InputOutput
-request req f inpss = cleanFlips req : let (!inp:inps) = inpss in f inp inps
+request req f inpss = req : let (!inp:inps) = inpss in f inp inps
 
 atLeastOneFlip :: [Flips] -> [Flips]
 atLeastOneFlip [] = [[1], [1]]
@@ -103,49 +115,66 @@ chunkSize = 10
 solve :: Int -> InputOutput
 solve n inps =
     let (fi:fs) = inps
-    in noMoreThan (limit n) . atLeastOneFlip . map cleanFlips $ process fi 1 fs
+    in noMoreThan (limit n) . atLeastOneFlip $ process fi 1 fs
   where
     process !f i
         | i > n = expect f n
         | otherwise =
         let len = min chunkSize (n - i + 1)
-            initVariants = buildVariantsCached len
-            indices = [i .. len + i - 1]
+            initVariants = buildInitVariantsCached len
+            buildVariant v = map (+i) $ filter (B.testBit v) [0 .. len - 1]
 
-            go seed variants =
-                let reqMask = randomListR seed (False, True)
-                    req = applyMask reqMask indices
+            go seed path variants =
+                let reqMask :: Word16 = head variants -- dropSeed $ randomR seed (1, variantsLast)
+                    req = buildVariant reqMask
                 in  request req $ \f' ->
                     let diff = f' - f
-                        variants' = filter (variantFits reqMask diff) variants
+                        getVariantsCacheOr' = if len == chunkSize then getVariantsCacheOr else const id
+                        variants' = -- (\x -> trace ("Variants: " ++ show (map buildVariant x)) x) $
+                                    getVariantsCacheOr' (diff : path) $
+                                    filter (variantFits reqMask diff) variants
                     in  (addToNext req .) $
-                            unless (f' == n) $
+                            -- unless (f' == n) $
                             case variants' of
                                 [] -> error "No variants remained!"
                                 [v] ->
-                                    let req' = map fst . filter ((== 0) . snd) $ zip indices v
+                                    let req' = buildVariant $ B.complement v
                                     in  -- trace ("Final in chunk, " ++ show v) $
                                         request req' $ \f'' ->
-                                                         unless (f'' == n) $
+                                            unless (f'' == n) $
                                                  process f'' (i + len)
-                                vars -> go (snd $ random seed) vars
-        in go 234234 initVariants
+                                vars -> go (dropSeed $ random seed) (diff : path) vars
+        in go 2334234 [] initVariants
+
+    buildInitVariants len =
+        let variantsLast = 2 ^ len - 1
+        in  (variantsLast :) $ A.elems . shuffle 232234 $
+            [variantsLast - 1, variantsLast - 2 .. 0]
+    buildInitVariantsDef = buildInitVariants chunkSize
+    buildInitVariantsCached len = if len == chunkSize then buildInitVariantsDef else buildInitVariants len
 
     variantFits mask diff variant =
-        let view = applyMask mask variant
-        in  diff == length view - 2 * (sum view)
-
-    applyMask :: [Bool] -> [a] -> [a]
-    applyMask m l = map snd . filter fst $ zip m l
+        let view = mask B..&. variant
+        in  diff == B.popCount mask - 2 * (B.popCount view)
 
     unless :: Bool -> InputOutput -> InputOutput
     unless False io = io
     unless True _   = const []
 
-    buildVariants len = A.elems $ shuffle 2345 $ replicateM len [0, 1]
-    buildVariantsDef = buildVariants chunkSize
-    buildVariantsCached len = if len == 10 then buildVariantsDef else buildVariants len
+variantsCache :: IORef (M.Map [Int] [Word16])
+variantsCache = unsafePerformIO $ newIORef M.empty
+{-# NOINLINE variantsCache #-}
 
+getVariantsCacheOr :: [Int] -> [Word16] -> [Word16]
+getVariantsCacheOr key value
+    | length key > 3 = value
+    | otherwise = unsafePerformIO $ do
+        cache <- readIORef variantsCache
+        case M.lookup key cache of
+            Just x -> return x
+            Nothing -> do
+                writeIORef variantsCache $ M.insert key value cache
+                return value
 
 test :: (Int -> InputOutput) -> [Int] -> IO ()
 test solution initial = doTest initial $ solution (length initial)
