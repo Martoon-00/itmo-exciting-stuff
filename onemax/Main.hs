@@ -4,13 +4,16 @@
 
 module Main where
 
-import           Control.Monad      (forM_)
-import           Prelude            hiding (interact)
-import           System.IO          (hClose, hFlush, stdin, stdout)
+import           Control.Monad         (forM, forM_, void)
+import           Prelude               hiding (interact)
+import           System.IO             (hClose, hFlush, stdin, stdout)
 
-import qualified Data.Array         as A
-import qualified Data.Array.MArray  as A
-import qualified Data.Array.ST.Safe as A
+import           Control.Monad.ST.Lazy as ST
+import qualified Data.Array            as A
+import qualified Data.Array.IO.Safe    as A
+import qualified Data.Array.ST.Safe    as A
+
+import           Debug.Trace
 
 main :: IO ()
 main = interact $ map (unwords . map show) . process . map read . words
@@ -63,16 +66,29 @@ atLeastOneFlip :: [Flips] -> [Flips]
 atLeastOneFlip [] = [[1], [1]]
 atLeastOneFlip fs = fs
 
+noMoreThan :: Int -> [a] -> [a]
+noMoreThan _ []     = []
+noMoreThan 0 _      = error "Too many values"
+noMoreThan k (x:xs) = x : noMoreThan (k - 1) xs
+
+expect :: Fitness -> Fitness -> InputOutput
+expect x y
+    | x == y = const []
+    | otherwise = error "Didn't reach end unexpectedly"
+
+limit :: Int -> Int
+limit n = (+ 50) . round $ (fromIntegral n / 4 * 3 :: Double)
+
 solve :: Int -> InputOutput
-solve n inps = let (fi:fs) = inps in atLeastOneFlip $ go fi n fs
+solve n inps = let (fi:fs) = inps in noMoreThan (limit n) . atLeastOneFlip $ go fi n fs
   where
-    go _ 0 =
+    go fl 0 =
         -- found solution
-        const []
+        expect fl n
     go fl 1
         -- check whether last element should be flipped
         | fl == n = const []
-        | otherwise = const [[1]]
+        | otherwise = request [1] $ expect n
     go !fl k =
         -- try to flip next 2 and see what happens
         let b1 = k
@@ -92,3 +108,27 @@ solve n inps = let (fi:fs) = inps in atLeastOneFlip $ go fi n fs
                         -1 -> addToNext [b1, b2] . go (fl + 1) (k - 2)
                         o  -> error ("got fitness diff " ++ show o ++ "??")
                 o  -> error ("got fitness diff " ++ show o ++ "?")
+
+test :: (Int -> InputOutput) -> [Int] -> IO ()
+test solution initial = doTest initial $ solution (length initial)
+  where
+    doTest :: [Int] -> InputOutput -> IO ()
+    doTest si sol = void . ST.stToIO . ST.fixST $ \input -> do
+        string <- A.newListArray (1, length si) si :: ST.ST s (A.STArray s Int Int)
+        let f = sum si
+        let output = sol input
+        fmap (sum si :) $ go 0 string f output
+    go (k :: Int) s f (out : output) = do
+        changes <- forM out $ \i -> do
+            e <- A.readArray s i
+            let e' = 1 - e
+            A.writeArray s i e'
+            return (e' - e)
+        let f' = f + sum changes
+        (f' : ) <$> go (k + 1) s f' output
+    go k _ f [] =
+        trace "Final:" $
+        trace ("Iterations: " ++ show k) $
+        trace ("Resulting fitness: " ++ show f) $
+        return []
+
