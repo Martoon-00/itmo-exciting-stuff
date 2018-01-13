@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns        #-}
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | ~3*n/4 solution of OneMax problem.
@@ -6,9 +7,10 @@
 module Main where
 
 import           Control.Monad         (forM, forM_, replicateM, void)
+import           Data.Bifunctor        (first, second)
 import           Data.IORef            (IORef, newIORef, readIORef, writeIORef)
 import           Data.List             (group, sort)
-import           Data.Word             (Word16)
+import           Data.Maybe            (catMaybes)
 import           GHC.IO.Unsafe         (unsafePerformIO)
 import           Prelude               hiding (interact)
 import           System.IO             (hClose, hFlush, stdin, stdout)
@@ -81,16 +83,25 @@ confuse seed n =
     let permutation = genPermutation seed n
     in  map $ \x -> permutation A.! x
 
-addToNext :: Flips -> [Flips] -> [Flips]
-addToNext f' (f:fs) = (f' ++ f) : fs
-addToNext f' []     = [f']
+addToNext :: Flips -> [Maybe Flips] -> [Maybe Flips]
+addToNext f' (Just f:fs) = Just (f' ++ f) : fs
+addToNext _  (Nothing:_) = []
+addToNext f' []          = [Just f']
+
+type InputOutput' = [Fitness] -> [Maybe Flips]
 
 -- | Helper for safe requests
-request :: Flips -> (Fitness -> InputOutput) -> InputOutput
-request req f inpss = req : let (!inp:inps) = inpss in f inp inps
+request :: Flips -> (Fitness -> InputOutput') -> InputOutput'
+request req f inpss = Just req : let (!inp:inps) = inpss in f inp inps
+
+finish :: InputOutput'
+finish = const []
+
+immediateFinish :: InputOutput'
+immediateFinish = const [Nothing]
 
 atLeastOneFlip :: [Flips] -> [Flips]
-atLeastOneFlip [] = [[1], [1]]
+atLeastOneFlip [] = replicate 2 [1]
 atLeastOneFlip fs = fs
 
 noMoreThan :: Int -> [a] -> [a]
@@ -98,34 +109,49 @@ noMoreThan _ []     = []
 noMoreThan 0 _      = error "Too many values"
 noMoreThan k (x:xs) = x : noMoreThan (k - 1) xs
 
-expect :: Fitness -> Fitness -> InputOutput
-expect x y
-    | x == y = const []
+expect :: Fitness -> Fitness -> a -> a
+expect x y a
+    | x == y = a
     | otherwise = error "Didn't reach end unexpectedly"
 
 limit :: Int -> Int
-limit n = (+ 50) . round $ (fromIntegral n / 4 * 3 :: Double)
+limit n = (+ 95) . round $ (fromIntegral n / 4 * 3 :: Double)
+
+cleanIO :: InputOutput -> InputOutput
+cleanIO f inpss =
+    let outs = f inpss'
+        (inpss', outs') = go inpss outs
+    in  outs'
+  where
+    go inpsss =
+        let (inp : inps) = inpsss
+        in  first (inp : ) . \case
+            [] -> ([], [])
+            []  : outs -> go (inp : inps) outs
+            out : outs -> second (out :) $ go inps outs
 
 cleanFlips :: Flips -> Flips
 cleanFlips = map head . filter (odd . length) . group . sort
 
 chunkSize :: Int
-chunkSize = 10
+chunkSize = 14
 
 solve :: Int -> InputOutput
-solve n inps =
-    let (fi:fs) = inps
-    in noMoreThan (limit n) . atLeastOneFlip $ process fi 1 fs
+solve n = cleanIO $ \(fi:fs) ->
+    noMoreThan (limit n) . map cleanFlips . catMaybes $ process fi 1 fs
   where
+    process :: Fitness -> Int -> InputOutput'
     process !f i
-        | i > n = expect f n
+        | f == n = finish
+        | i > n = expect f n $ finish
         | otherwise =
         let len = min chunkSize (n - i + 1)
             initVariants = buildInitVariantsCached len
             buildVariant v = map (+i) $ filter (B.testBit v) [0 .. len - 1]
 
+            go :: Seed -> [Fitness] -> [Word] -> InputOutput'
             go seed path variants =
-                let reqMask :: Word16 = head variants -- dropSeed $ randomR seed (1, variantsLast)
+                let reqMask :: Word = head variants -- dropSeed $ randomR seed (1, variantsLast)
                     req = buildVariant reqMask
                 in  request req $ \f' ->
                     let diff = f' - f
@@ -133,8 +159,8 @@ solve n inps =
                         variants' = -- (\x -> trace ("Variants: " ++ show (map buildVariant x)) x) $
                                     getVariantsCacheOr' (diff : path) $
                                     filter (variantFits reqMask diff) variants
-                    in  (addToNext req .) $
-                            -- unless (f' == n) $
+                    in  unless (f' == n) $
+                            addToNext req .
                             case variants' of
                                 [] -> error "No variants remained!"
                                 [v] ->
@@ -148,7 +174,7 @@ solve n inps =
 
     buildInitVariants len =
         let variantsLast = 2 ^ len - 1
-        in  (variantsLast :) $ A.elems . shuffle 232234 $
+        in  (variantsLast :) $ A.elems . shuffle 2332347 $
             [variantsLast - 1, variantsLast - 2 .. 0]
     buildInitVariantsDef = buildInitVariants chunkSize
     buildInitVariantsCached len = if len == chunkSize then buildInitVariantsDef else buildInitVariants len
@@ -157,17 +183,17 @@ solve n inps =
         let view = mask B..&. variant
         in  diff == B.popCount mask - 2 * (B.popCount view)
 
-    unless :: Bool -> InputOutput -> InputOutput
+    unless :: Bool -> InputOutput' -> InputOutput'
     unless False io = io
-    unless True _   = const []
+    unless True _   = immediateFinish
 
-variantsCache :: IORef (M.Map [Int] [Word16])
+variantsCache :: IORef (M.Map [Int] [Word])
 variantsCache = unsafePerformIO $ newIORef M.empty
 {-# NOINLINE variantsCache #-}
 
-getVariantsCacheOr :: [Int] -> [Word16] -> [Word16]
+getVariantsCacheOr :: [Int] -> [Word] -> [Word]
 getVariantsCacheOr key value
-    | length key > 3 = value
+    | length key > 7 = value
     | otherwise = unsafePerformIO $ do
         cache <- readIORef variantsCache
         case M.lookup key cache of
@@ -198,4 +224,3 @@ test solution initial = doTest initial $ solution (length initial)
         trace ("Iterations: " ++ show k) $
         trace ("Resulting fitness: " ++ show f) $
         return []
-
