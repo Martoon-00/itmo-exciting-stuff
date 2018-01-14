@@ -52,4 +52,16 @@ executable OneMax
   default-language:    Haskell2010
   ghc-options:         -Wall
 
+executable NonDominating
+  hs-source-dirs:      nondominating
+  main-is:             Main.hs
+  build-depends:       base,
+                       array,
+                       containers,
+                       mtl,
+                       vector
+  default-language:    Haskell2010
+  ghc-options:         -Wall
+
+
 
