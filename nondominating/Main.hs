@@ -7,6 +7,7 @@
 module Main where
 
 import           Control.Arrow              ((&&&))
+import           Control.Monad              (unless)
 import           Control.Monad.Fix          (fix)
 import           Control.Monad.State.Strict (State, evalState, get, modify)
 import           Data.Function              (on)
@@ -19,13 +20,19 @@ import qualified Data.List                  as L
 import qualified Data.Map.Strict            as M
 import qualified Data.Vector                as V
 
+import qualified Test.QuickCheck            as Q hiding (reason)
+import qualified Test.QuickCheck.Gen        as Q
+import qualified Test.QuickCheck.Property   as Q
+import qualified Test.QuickCheck.Random     as Q
+
 import           Debug.Trace
 
 main :: IO ()
 main = interact $ (++ "\n") . unwords . map show . process . map read . words
   where
-    process (n:d:coord) = solve d (map V.fromList . take n $ chunksOf d coord)
-    process _           = error "not enought input"
+   process (n:d:coord) = solve sortSplitAndConquer d $
+                         map V.fromList . take n $ chunksOf d coord
+   process _           = error "not enought input"
 
 type Point = V.Vector Int
 type Rank = Int
@@ -99,15 +106,21 @@ fromLineEntry (PointMeta p r _) = (p, r)
 updateRank :: (Rank -> Rank) -> (PointMeta -> PointMeta)
 updateRank f m = m { metaRank = f (metaRank m) }
 
-sortDumb :: [(Point, Rank)] -> [(Point, Rank)] -> [(Point, Rank)]
-sortDumb known request = fix $ \newRequestPoints ->
-    flip map request $ \(me, myRank) ->
-        let allPoints = known ++ newRequestPoints
-            dominators = filter ((`dominates` me) . fst) allPoints
-            newRank = case dominators of
-                [] -> 0
-                ds -> maximum (map snd ds) + 1
-        in (me, max myRank newRank)
+type Solver
+     = V.Vector (Point, Rank)  -- ^ known ranks
+    -> V.Vector (Point, Rank)  -- ^ request
+    -> V.Vector (Point, Rank)  -- ^ updated request points
+
+sortDumb :: Solver
+sortDumb (V.toList -> known) (V.toList -> request) =
+    V.fromList . fix $ \newRequestPoints ->
+        flip map request $ \(me, myRank) ->
+            let allPoints = known ++ newRequestPoints
+                dominators = filter ((`dominates` me) . fst) allPoints
+                newRank = case dominators of
+                    [] -> 0
+                    ds -> maximum (map snd ds) + 1
+            in (me, max myRank newRank)
 
 -- | 'True' if point is part of request, `False` if it is known.
 -- Since points from request are always greater than known points
@@ -119,12 +132,12 @@ sortDumb known request = fix $ \newRequestPoints ->
 newtype Interest = Interest { getInterest :: Bool }
     deriving (Eq, Ord, Show)
 
-sortSweepLine :: [(Point, Rank)] -> [(Point, Rank)] -> [(Point, Rank)]
-sortSweepLine known request =
+sortSweepLine :: Solver
+sortSweepLine (V.toList -> known) (V.toList -> request) =
     let allPoints = map (toLineEntry False) known
                  ++ map (toLineEntry True) request
         sortedPoints = L.sortBy (comparing $ (getX &&& getY) . metaPoint) allPoints
-    in  map fromLineEntry . filter metaForAnswer $
+    in  V.fromList . map fromLineEntry . filter metaForAnswer $
         flip evalState M.empty $ mapM sweepLine sortedPoints
   where
     getX = (V.! 0)
@@ -133,7 +146,7 @@ sortSweepLine known request =
     sweepLine :: PointMeta -> State (M.Map (Int, Interest) PointMeta) PointMeta
     sweepLine meta = do
         let key = getLineKey meta
-        line <- get
+        line <- traceShowId <$> get
         case M.lookupGT key line of
             Nothing -> do
                 let maxRank = fromMaybe 0 $ (+1) . metaRank . fst <$> M.maxView line
@@ -148,12 +161,10 @@ sortSweepLine known request =
 
 sortSplitAndConquer
     :: Int                    -- ^ current dimension
-    -> V.Vector (Point, Rank) -- ^ known ranks
-    -> V.Vector (Point, Rank) -- ^ request
-    -> V.Vector (Point, Rank) -- ^ updated ranks of requested points
+    -> Solver
 sortSplitAndConquer 0 _ _ = error "Too difficult"
 sortSplitAndConquer 1 _ _ = error "Dunno how to work for 1-dim"
-sortSplitAndConquer 2 known req = V.fromList $ sortSweepLine (V.toList known) (V.toList req)
+sortSplitAndConquer 2 known req = sortSweepLine known req
 sortSplitAndConquer d known req   -- TODO: extended base
     | length req == 0 =
         V.empty
@@ -181,15 +192,42 @@ sortSplitAndConquer d known req   -- TODO: extended base
   where
     getCoord = (V.! (d - 1))
 
-solve :: Int -> [Point] -> [Rank]
-solve d points =
+solve :: (Int -> Solver) -> Int -> [Point] -> [Rank]
+solve solver d points =
     let order = M.fromListWith mappend $ zip points $ map (\x -> [x]) [1 :: Int ..]
         getOrder p = fromJust $ M.lookup p order
         pointsNoDups = nubSeqBy id $ L.sort points
         request = V.fromList $ map (, 0) $ pointsNoDups
-        answer = V.toList $ sortSplitAndConquer d V.empty request
+        answer = V.toList $ solver d V.empty request
     in  map snd . nubSeqBy fst . L.sortOn fst $
         [ (id', rank)
         | (point, rank) <- answer
         , id' <- getOrder point
         ]
+
+genInput :: Int -> Int -> Q.Gen [Point]
+genInput d pointsNum =
+    Q.vectorOf pointsNum .
+        fmap V.fromList . Q.vectorOf d $
+        Q.resize 10 $ Q.getNonNegative <$> Q.arbitrary
+
+-- | Invoke given generator, passing specified seed
+-- (generators are deterministic).
+generateDet :: Int -> Q.Gen a -> a
+generateDet seed gen = Q.unGen gen (Q.mkQCGen seed) 10
+
+check :: Int -> [Point] -> Either String ()
+check d points = do
+    let ans = solve sortSplitAndConquer d points
+        ans' = solve (\_d -> sortDumb) d points
+    unless (ans == ans') $
+        Left $ "Bad answer, got " ++ show ans ++ ", expected " ++ show ans'
+
+test :: Maybe Int -> Int -> Int -> IO ()
+test seed d n = Q.quickCheckWith args $ Q.forAll (genInput d n) $ \input ->
+    trace "" $
+    case check d input of
+        Left err -> Q.failed{ Q.reason = err }
+        Right () -> Q.succeeded
+  where
+    args = Q.stdArgs{ Q.replay = fmap (\s -> (Q.mkQCGen s, s)) seed }
