@@ -1,5 +1,6 @@
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE ViewPatterns  #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections   #-}
+{-# LANGUAGE ViewPatterns    #-}
 
 -- | Non-dominating sort of many-dimensional objects
 
@@ -9,8 +10,8 @@ import           Control.Arrow              ((&&&))
 import           Control.Monad.Fix          (fix)
 import           Control.Monad.State.Strict (State, evalState, get, modify)
 import           Data.Function              (on)
-import           Data.Maybe                 (fromJust)
-import           Data.Ord                   (Down (..), comparing)
+import           Data.Maybe                 (fromJust, fromMaybe)
+import           Data.Ord                   (comparing)
 import           GHC.Exts                   (build)
 import           Prelude
 
@@ -87,24 +88,13 @@ data PointMeta = PointMeta
     { metaPoint     :: Point
     , metaRank      :: Rank
     , metaForAnswer :: Bool
-    }
+    } deriving (Show)
 
 toLineEntry :: Bool -> (Point, Rank) -> PointMeta
 toLineEntry a (p, r) = PointMeta p r a
 
 fromLineEntry :: PointMeta -> (Point, Rank)
 fromLineEntry (PointMeta p r _) = (p, r)
-
--- | Whether, considering reduced set of coordinates, equality of
--- some coordinate is allowed.
-data Dominance
-    = NoDominance    -- ^ domination is determined on usual rules
-    | PartDominance  -- ^ one of sets dominates another one except cases of coordinates total match
-    | TotalDominance -- ^ one of sets dominates another
-    deriving (Eq, Ord, Enum)
-
-nextDom :: Dominance -> Dominance
-nextDom = toEnum . succ . fromEnum
 
 updateRank :: (Rank -> Rank) -> (PointMeta -> PointMeta)
 updateRank f m = m { metaRank = f (metaRank m) }
@@ -119,47 +109,52 @@ sortDumb known request = fix $ \newRequestPoints ->
                 ds -> maximum (map snd ds) + 1
         in (me, max myRank newRank)
 
-sortSweepLine :: Dominance -> [(Point, Rank)] -> [(Point, Rank)] -> [(Point, Rank)]
-sortSweepLine TotalDominance _ _ = undefined -- sortFullDominance known request
-sortSweepLine dominance known request =
+-- | 'True' if point is part of request, `False` if it is known.
+-- Since points from request are always greater than known points
+-- at least in one coordinate, if in 'sortSweepLine' we encounter
+-- request point with X and Y the same as for some known point,
+-- then that known dominates the request point due to some other coordinate,
+-- (but there is no domination for reqest-reqest and known-known points pairs).
+-- This type helps to set known points in VIP position.
+newtype Interest = Interest { getInterest :: Bool }
+    deriving (Eq, Ord, Show)
+
+sortSweepLine :: [(Point, Rank)] -> [(Point, Rank)] -> [(Point, Rank)]
+sortSweepLine known request =
     let allPoints = map (toLineEntry False) known
                  ++ map (toLineEntry True) request
-        sortedPoints = L.sortBy (comparing $ (getX &&& Down . getY) . metaPoint) allPoints
+        sortedPoints = L.sortBy (comparing $ (getX &&& getY) . metaPoint) allPoints
     in  map fromLineEntry . filter metaForAnswer $
         flip evalState M.empty $ mapM sweepLine sortedPoints
   where
     getX = (V.! 0)
     getY = (V.! 1)
-    lineLookup =
-        case dominance of
-            NoDominance   -> M.lookupGE
-            PartDominance -> M.lookupGT
-            _             -> error "Unexpected TotalDominance"
-    sweepLine :: PointMeta -> State (M.Map Int PointMeta) PointMeta
+    getLineKey PointMeta{..} = (getY metaPoint, Interest metaForAnswer)
+    sweepLine :: PointMeta -> State (M.Map (Int, Interest) PointMeta) PointMeta
     sweepLine meta = do
-        let y = getY (metaPoint meta)
+        let key = getLineKey meta
         line <- get
-        case lineLookup y line of
+        case M.lookupGT key line of
             Nothing -> do
-                let newMeta = updateRank (max (M.size line)) meta  -- TODO: what if known?
-                modify $ M.insert y newMeta
+                let maxRank = fromMaybe 0 $ (+1) . metaRank . fst <$> M.maxView line
+                let newMeta = updateRank (max maxRank) meta
+                modify $ M.insert key newMeta
                 return newMeta
             Just (oldY, oldMeta) -> do
                 let newMeta = updateRank (max (metaRank oldMeta)) meta
-                modify $ M.insert y newMeta
+                modify $ M.insert key newMeta
                        . M.delete oldY
                 return newMeta
 
 sortSplitAndConquer
-    :: Dominance
-    -> Int                    -- ^ current dimension
+    :: Int                    -- ^ current dimension
     -> V.Vector (Point, Rank) -- ^ known ranks
     -> V.Vector (Point, Rank) -- ^ request
     -> V.Vector (Point, Rank) -- ^ updated ranks of requested points
-sortSplitAndConquer _ 0 _ _ = error "Too difficult"
-sortSplitAndConquer _ 1 _ _ = error "Dunno how to work for 1-dim"
-sortSplitAndConquer t 2 known req = V.fromList $ sortSweepLine t (V.toList known) (V.toList req)
-sortSplitAndConquer t d known req   -- TODO: extended base
+sortSplitAndConquer 0 _ _ = error "Too difficult"
+sortSplitAndConquer 1 _ _ = error "Dunno how to work for 1-dim"
+sortSplitAndConquer 2 known req = V.fromList $ sortSweepLine (V.toList known) (V.toList req)
+sortSplitAndConquer d known req   -- TODO: extended base
     | length req == 0 =
         V.empty
     | length req == 1 =
@@ -172,15 +167,15 @@ sortSplitAndConquer t d known req   -- TODO: extended base
         let med = findMed id $ fmap (getCoord . fst) req  -- TODO: try no decorate?
             comparingToMed (p, _) = getCoord p `compare` med
             (knownL, knownM, knownR) = split comparingToMed known
-            (reqL, reqM, reqR) = traceShowId $ split comparingToMed req
+            (reqL, reqM, reqR) = split comparingToMed req
 
-            sortedL = sortSplitAndConquer (nextDom t) d knownL reqL
+            sortedL = sortSplitAndConquer d knownL reqL
             -- !_ = trace ("sortedL: " ++ show sortedL) 0
-            sortedM = sortSplitAndConquer t (d - 1) (mconcat [knownL, sortedL]) $
-                      sortSplitAndConquer (nextDom t) (d - 1) sortedL reqM
+            sortedM = sortSplitAndConquer (d - 1) (mconcat [knownL, sortedL]) $
+                      sortSplitAndConquer (d - 1) sortedL reqM
             -- !_ = trace ("sortedM: " ++ show sortedM) 0
-            sortedR = sortSplitAndConquer t (d - 1) (mconcat [knownL, knownM, sortedL, sortedM]) $
-                      sortSplitAndConquer (nextDom t) d knownR reqR
+            sortedR = sortSplitAndConquer (d - 1) (mconcat [knownL, knownM, sortedL, sortedM]) $
+                      sortSplitAndConquer d knownR reqR
             -- !_ = trace ("sortedR: " ++ show sortedR) 0
         in  mconcat [sortedL, sortedM, sortedR]
   where
@@ -190,8 +185,9 @@ solve :: Int -> [Point] -> [Rank]
 solve d points =
     let order = M.fromListWith mappend $ zip points $ map (\x -> [x]) [1 :: Int ..]
         getOrder p = fromJust $ M.lookup p order
-        request = V.fromList $ map (, 0) points
-        answer = V.toList $ sortSplitAndConquer NoDominance d V.empty request
+        pointsNoDups = nubSeqBy id $ L.sort points
+        request = V.fromList $ map (, 0) $ pointsNoDups
+        answer = V.toList $ sortSplitAndConquer d V.empty request
     in  map snd . nubSeqBy fst . L.sortOn fst $
         [ (id', rank)
         | (point, rank) <- answer
