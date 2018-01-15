@@ -6,6 +6,7 @@
 module Main where
 
 import           Control.Arrow              ((&&&))
+import           Control.Monad.Fix          (fix)
 import           Control.Monad.State.Strict (State, evalState, get, modify)
 import           Data.Function              (on)
 import           Data.Maybe                 (fromJust)
@@ -88,6 +89,12 @@ data PointMeta = PointMeta
     , metaForAnswer :: Bool
     }
 
+toLineEntry :: Bool -> (Point, Rank) -> PointMeta
+toLineEntry a (p, r) = PointMeta p r a
+
+fromLineEntry :: PointMeta -> (Point, Rank)
+fromLineEntry (PointMeta p r _) = (p, r)
+
 -- | Whether, considering reduced set of coordinates, equality of
 -- some coordinate is allowed.
 data Dominance
@@ -102,13 +109,20 @@ nextDom = toEnum . succ . fromEnum
 updateRank :: (Rank -> Rank) -> (PointMeta -> PointMeta)
 updateRank f m = m { metaRank = f (metaRank m) }
 
+sortDumb :: [(Point, Rank)] -> [(Point, Rank)] -> [(Point, Rank)]
+sortDumb known request = fix $ \newRequestPoints ->
+    flip map request $ \(me, myRank) ->
+        let allPoints = known ++ newRequestPoints
+            dominators = filter ((`dominates` me) . fst) allPoints
+            newRank = case dominators of
+                [] -> 0
+                ds -> maximum (map snd ds) + 1
+        in (me, max myRank newRank)
 
 sortSweepLine :: Dominance -> [(Point, Rank)] -> [(Point, Rank)] -> [(Point, Rank)]
 sortSweepLine TotalDominance _ _ = undefined -- sortFullDominance known request
 sortSweepLine dominance known request =
-    let toLineEntry a (p, r) = PointMeta p r a
-        fromLineEntry (PointMeta p r _) = (p, r)
-        allPoints = map (toLineEntry False) known
+    let allPoints = map (toLineEntry False) known
                  ++ map (toLineEntry True) request
         sortedPoints = L.sortBy (comparing $ (getX &&& Down . getY) . metaPoint) allPoints
     in  map fromLineEntry . filter metaForAnswer $
