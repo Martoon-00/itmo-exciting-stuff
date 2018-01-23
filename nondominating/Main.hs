@@ -30,7 +30,7 @@ import           Debug.Trace
 main :: IO ()
 main = interact $ (++ "\n") . unwords . map show . process . map read . words
   where
-   process (n:d:coord) = solve sortSplitAndConquer d $
+   process (n:d:coord) = solve (sortSplitAndConquer False) d $
                          map V.fromList . take n $ chunksOf d coord
    process _           = error "not enought input"
 
@@ -103,8 +103,12 @@ toLineEntry a (p, r) = PointMeta p r a
 fromLineEntry :: PointMeta -> (Point, Rank)
 fromLineEntry (PointMeta p r _) = (p, r)
 
-updateRank :: (Rank -> Rank) -> (PointMeta -> PointMeta)
-updateRank f m = m { metaRank = f (metaRank m) }
+updateRankIfNotKnown :: Rank -> (PointMeta -> PointMeta)
+updateRankIfNotKnown r m
+    | metaForAnswer m = m { metaRank = max r (metaRank m) }
+    | otherwise = m
+
+type PartialDominance = Bool
 
 type Solver
      = V.Vector (Point, Rank)  -- ^ known ranks
@@ -132,8 +136,8 @@ sortDumb (V.toList -> known) (V.toList -> request) =
 newtype Interest = Interest { getInterest :: Bool }
     deriving (Eq, Ord, Show)
 
-sortSweepLine :: Solver
-sortSweepLine (V.toList -> known) (V.toList -> request) =
+sortSweepLine :: PartialDominance -> Solver
+sortSweepLine partDom (V.toList -> known) (V.toList -> request) =
     let allPoints = map (toLineEntry False) known
                  ++ map (toLineEntry True) request
         sortedPoints = L.sortBy (comparing $ (getX &&& getY) . metaPoint) allPoints
@@ -146,26 +150,27 @@ sortSweepLine (V.toList -> known) (V.toList -> request) =
     sweepLine :: PointMeta -> State (M.Map (Int, Interest) PointMeta) PointMeta
     sweepLine meta = do
         let key = getLineKey meta
-        line <- traceShowId <$> get
+        line <- get
         case M.lookupGT key line of
             Nothing -> do
                 let maxRank = fromMaybe 0 $ (+1) . metaRank . fst <$> M.maxView line
-                let newMeta = updateRank (max maxRank) meta
+                let newMeta = updateRankIfNotKnown maxRank meta
                 modify $ M.insert key newMeta
                 return newMeta
             Just (oldY, oldMeta) -> do
-                let newMeta = updateRank (max (metaRank oldMeta)) meta
+                modify $ M.delete oldY
+                let newMeta = updateRankIfNotKnown (metaRank oldMeta) meta
                 modify $ M.insert key newMeta
-                       . M.delete oldY
                 return newMeta
 
 sortSplitAndConquer
-    :: Int                    -- ^ current dimension
+    :: PartialDominance
+    -> Int                    -- ^ current dimension
     -> Solver
-sortSplitAndConquer 0 _ _ = error "Too difficult"
-sortSplitAndConquer 1 _ _ = error "Dunno how to work for 1-dim"
-sortSplitAndConquer 2 known req = sortSweepLine known req
-sortSplitAndConquer d known req   -- TODO: extended base
+sortSplitAndConquer _ 0 _ _ = error "Too difficult"
+sortSplitAndConquer _ 1 _ _ = error "Dunno how to work for 1-dim"
+sortSplitAndConquer dom 2 known req = sortSweepLine dom known req
+sortSplitAndConquer dom d known req   -- TODO: extended base
     | length req == 0 =
         V.empty
     | length req == 1 =
@@ -180,13 +185,13 @@ sortSplitAndConquer d known req   -- TODO: extended base
             (knownL, knownM, knownR) = split comparingToMed known
             (reqL, reqM, reqR) = split comparingToMed req
 
-            sortedL = sortSplitAndConquer d knownL reqL
+            sortedL = sortSplitAndConquer dom d knownL reqL
             -- !_ = trace ("sortedL: " ++ show sortedL) 0
-            sortedM = sortSplitAndConquer (d - 1) (mconcat [knownL, sortedL]) $
-                      sortSplitAndConquer (d - 1) sortedL reqM
+            sortedM = sortSplitAndConquer True (d - 1) (mconcat [knownL, sortedL]) $
+                      sortSplitAndConquer dom (d - 1) knownM reqM
             -- !_ = trace ("sortedM: " ++ show sortedM) 0
-            sortedR = sortSplitAndConquer (d - 1) (mconcat [knownL, knownM, sortedL, sortedM]) $
-                      sortSplitAndConquer d knownR reqR
+            sortedR = sortSplitAndConquer True (d - 1) (mconcat [knownL, knownM, sortedL, sortedM]) $
+                      sortSplitAndConquer dom d knownR reqR
             -- !_ = trace ("sortedR: " ++ show sortedR) 0
         in  mconcat [sortedL, sortedM, sortedR]
   where
@@ -218,7 +223,7 @@ generateDet seed gen = Q.unGen gen (Q.mkQCGen seed) 10
 
 check :: Int -> [Point] -> Either String ()
 check d points = do
-    let ans = solve sortSplitAndConquer d points
+    let ans = solve (sortSplitAndConquer False) d points
         ans' = solve (\_d -> sortDumb) d points
     unless (ans == ans') $
         Left $ "Bad answer, got " ++ show ans ++ ", expected " ++ show ans'
