@@ -62,7 +62,7 @@ executable NonDominating
                        QuickCheck,
                        vector
   default-language:    Haskell2010
-  ghc-options:         -Wall
+  ghc-options:         -Wall -O2
 
 
 

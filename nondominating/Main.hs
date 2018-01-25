@@ -1,8 +1,12 @@
-{-# LANGUAGE BangPatterns     #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RecordWildCards  #-}
-{-# LANGUAGE TupleSections    #-}
-{-# LANGUAGE ViewPatterns     #-}
+{-# LANGUAGE BangPatterns        #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE Rank2Types          #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE ViewPatterns        #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | Non-dominating sort of many-dimensional objects
 
@@ -11,14 +15,18 @@ module Main where
 import           Control.Arrow            ((&&&))
 import           Control.Monad            (forM, forM_, unless, when)
 import           Control.Monad.Fix        (fix)
+import           Control.Monad.Reader     (ReaderT, ask, mapReaderT, runReaderT)
 import qualified Control.Monad.ST         as ST
-import           Control.Monad.State      (State, evalState, get, modify, put, runState)
+import           Control.Monad.State      (StateT, evalStateT, get, modify, put,
+                                           runStateT)
+import           Control.Monad.Trans      (lift)
 import           Data.Bifunctor           (first, second)
 import           Data.Function            (on)
 import           Data.Maybe               (fromJust, fromMaybe)
 import           Data.Monoid              (Sum (..))
 import           Data.Monoid              ((<>))
 import           Data.Ord                 (comparing)
+import           Data.Semigroup           (Max (..))
 import qualified Data.Set                 as S
 import qualified Data.STRef.Strict        as ST
 import           GHC.Exts                 (build)
@@ -36,11 +44,15 @@ import qualified Test.QuickCheck.Random   as Q
 import           Debug.Trace
 
 main :: IO ()
-main = interact $ (++ "\n") . unwords . map show . process . map read . words
-  where
-   process (n:d:coord) = solve sortSAC d $
-                         map V.fromList . take n $ chunksOf d coord
-   process _           = error "not enought input"
+-- main = interact $ (++ "\n") . unwords . map show . process . map read . words
+--   where
+--    process (n:d:coord) = solve sortSAC d $
+--                          map V.fromList . take n $ chunksOf d coord
+--    process _           = error "not enought input"
+main = do
+    [d, n] <- map read . words <$> getLine
+    input <- Q.generate (genInput d n)
+    print . sum $ solve sortSAC d input
 
 type Coord = Int
 type Point = V.Vector Coord
@@ -57,7 +69,7 @@ splitOnMed cmp v =
     in  split (`comp` med) v
 
 findMed :: Ord b => (a -> b) -> V.Vector a -> a
-findMed cmp v = findKth cmp v (V.length v `div` 2)
+findMed cmp v = findMedMed cmp (V.toList v) -- findKth cmp v (V.length v `div` 2)
 
 findKth :: Ord b => (a -> b) -> V.Vector a -> Int -> a
 findKth cmp v k =
@@ -186,7 +198,7 @@ dominates (V.toList -> p1) (V.toList -> p2) = and
 nubSeqBy :: Eq b => (a -> b) -> [a] -> [a]
 nubSeqBy cmp = map head . L.groupBy ((==) `on` cmp)
 
-noChanges :: State s a -> State s a
+noChanges :: Monad m => StateT s m a -> StateT s m a
 noChanges state = get >>= \s -> state <* put s
 
 data Lens s a = Lens { getter :: s -> a, setter :: a -> s -> s }
@@ -197,10 +209,10 @@ _1 = Lens fst (first . const)
 _2 :: Lens (a, b) b
 _2 = Lens snd (second . const)
 
-zoom :: Lens s1 s2 -> State s2 a -> State s1 a
+zoom :: Monad m => Lens s1 s2 -> StateT s2 m a -> StateT s1 m a
 zoom lens state = do
     s <- get
-    let (a, s') = runState state (getter lens s)
+    (a, s') <- lift $ runStateT state (getter lens s)
     modify (setter lens s') *> pure a
 
 -- * Solution
@@ -210,6 +222,12 @@ data PointMeta = PointMeta
     , metaRank      :: Rank
     , metaForAnswer :: Bool
     } deriving (Show)
+
+instance Eq PointMeta where
+    (==) = (==) `on` metaPoint
+
+instance Ord PointMeta where
+    compare = compare `on` metaPoint
 
 toLineEntry :: Bool -> (Point, Rank) -> PointMeta
 toLineEntry a (p, r) = PointMeta p r a
@@ -255,24 +273,29 @@ updateDumb (V.toList -> known) (V.toList -> request) =
 newtype Interest = Interest { getInterest :: Bool }
     deriving (Eq, Ord, Show)
 
+instance Bounded a => Bounded (Maybe a) where
+    minBound = Nothing
+    maxBound = Just maxBound
+
 data SortMode
     = LoopMode (V.Vector (Point, Rank))
     | UpdateMode (V.Vector (Point, Rank)) (V.Vector (Point, Rank))
 
-type LineState = State (M.Map (Coord, Rank) PointMeta, M.Map Rank PointMeta)
+type LineState a = forall s. ReaderT (RankTree s) (StateT (M.Map (Coord, Rank) PointMeta, M.Map Rank PointMeta) (ST.ST s)) a
+type RankTree s = SegmentTree s Coord PointMeta (Max (Maybe Rank))
 
 sortSweepLine :: SortMode -> V.Vector (Point, Rank)
 sortSweepLine = \case
     LoopMode (V.toList -> request) -> V.fromList $
         let points = map (toLineEntry True) request
             sortedPoints = lexSort points
-            result = runSweepLine $ mapM loopSweepLine sortedPoints
+            result = runSweepLine sortedPoints $ mapM loopSweepLine sortedPoints
         in  map fromLineEntry result
     UpdateMode (V.toList -> known) (V.toList -> request) -> V.fromList $
         let allPoints = map (toLineEntry False) known
                      ++ map (toLineEntry True) request
             sortedPoints = lexSort allPoints
-            updated = runSweepLine $ mapM updatingSweepLine sortedPoints
+            updated = runSweepLine sortedPoints $ mapM updatingSweepLine sortedPoints
         in  map fromLineEntry $ filter metaForAnswer updated
   where
     getX = (V.! 0)
@@ -280,16 +303,22 @@ sortSweepLine = \case
     getMetaY PointMeta{..} = getY metaPoint
     getLineKeyNoRank = (, maxBound) . getMetaY
     lexSort = L.sortBy (comparing $ (getX &&& getY) . metaPoint)
-    runSweepLine :: State (M.Map k v, M.Map k2 v2) a -> a
-    runSweepLine = flip evalState (M.empty, M.empty)
+    initRankTree = mkSegTree getMetaY (foldMap $ Max . Just . metaRank)
+    runSweepLine :: [PointMeta] -> LineState a -> a
+    runSweepLine allPoints action = ST.runST $ do
+        rankTree <- initRankTree allPoints
+        flip evalStateT (M.empty, M.empty) $
+            flip runReaderT rankTree action
 
     insert getLineKey meta = do
         modify . first $ M.insert (getLineKey meta) meta
         modify . second $ M.insert (metaRank meta) meta
+        ask >>= \rankTree -> lift . lift $ insertSegTree meta rankTree
 
     delete getLineKey meta = do
         modify . first $ M.delete (getLineKey meta)
         modify . second $ M.delete (metaRank meta)
+        ask >>= \rankTree -> lift . lift $ deleteSegTree meta rankTree
 
     -- | For given request points, update ranks.
     -- Here and below, line is stored as map from Y coordinate to the point.
@@ -303,7 +332,7 @@ sortSweepLine = \case
     updatingSweepLine :: PointMeta -> LineState PointMeta
     updatingSweepLine meta =
         if metaForAnswer meta
-        then noChanges $ processRequestPoint getLineKeyNoRank meta
+        then mapReaderT noChanges $ processRequestPoint getLineKeyNoRank meta
         else processKnownPoint (getMetaY &&& metaRank) meta
 
     processKnownPoint getLineKey meta = do
@@ -337,21 +366,24 @@ sortSweepLine = \case
         let maxRank = getMaxFrontRank front
         let newMeta = updateRankIfNotKnown maxRank meta
         insert getLineKey newMeta
-        !_ <- traceM ("Inserting " ++ show newMeta)
+        -- !_ <- traceM ("Inserting " ++ show newMeta)
         return newMeta
     lowerPoint :: (PointMeta -> (Coord, Rank)) -> PointMeta -> PointMeta -> LineState PointMeta
     lowerPoint getLineKey oldMeta meta = do
         let key = getLineKey meta
-        (line, front) <- get
-        let belowRank = metaRank . snd <$> M.lookupLE key line
-        let newRank = maybe 0 (+1) belowRank
+        (_, front) <- get
+        maxLowerRank <- ask >>= \tree -> lift . lift $ requestSegTree (minBound, fst key) tree
+        let newRank = maybe 0 (+1) $ getMax maxLowerRank
         -- update line
         when (newRank == metaRank oldMeta) $
             delete getLineKey $ (\(Just x) -> x) $ M.lookup newRank front
         let newMeta = updateRankIfNotKnown newRank meta
         insert getLineKey newMeta
-        !_ <- traceM ("Replacing " ++ show oldMeta ++ " with " ++ show newMeta)
+        -- !_ <- traceM ("Replacing " ++ show oldMeta ++ " with " ++ show newMeta)
         return newMeta
+
+optEdge :: Int
+optEdge = 1
 
 sortSAC
     :: Int                    -- ^ current dimension
@@ -360,22 +392,22 @@ sortSAC
 sortSAC 0 _ = error "Too difficult"
 sortSAC 1 _ = error "Dunno how to work for 1-dim"
 sortSAC 2 points = sortSweepLine (LoopMode points)
-sortSAC d points   -- TODO: extended base
-    | length points <= 1 = points
+sortSAC d points
+    | length points <= optEdge = sortDumb points
     | otherwise =
         let med = findMed id $ fmap (getCoord . fst) points  -- TODO: try no decorate?
             comparingToMed (p, _) = getCoord p `compare` med
             (pointsL, pointsM, pointsR) = split comparingToMed points
-            !_ = trace ("loop split " ++ show (pointsL, pointsM, pointsR)) ()
+            -- !_ = trace ("loop split " ++ show (pointsL, pointsM, pointsR)) ()
 
             sortedL = sortSAC d pointsL
-            !_ = trace ("loop sortedL: " ++ show sortedL) ()
+            -- !_ = trace ("loop sortedL: " ++ show sortedL) ()
             sortedM = sortSAC (d - 1) $
                       updateSAC d sortedL pointsM
-            !_ = trace ("loop sortedM: " ++ show sortedM) ()
+            -- !_ = trace ("loop sortedM: " ++ show sortedM) ()
             sortedR = sortSAC d $
                       updateSAC d (sortedL <> sortedM) pointsR
-            !_ = trace ("loop sortedR: " ++ show sortedR) ()
+            -- !_ = trace ("loop sortedR: " ++ show sortedR) ()
         in  mconcat [sortedL, sortedM, sortedR]
   where
     getCoord = (V.! (d - 1))
@@ -388,31 +420,25 @@ updateSAC
 updateSAC 0 _ _ = error "Too difficult"
 updateSAC 1 _ _ = error "Dunno how to work for 1-dim"
 updateSAC 2 known req = sortSweepLine (UpdateMode known req)
-updateSAC d known req   -- TODO: extended base
-    | length req == 0 =
-        V.empty
-    | length req == 1 =
-        let [(req1, rank)] = V.toList req
-            newRank = maximum . (rank :) . map (succ . snd) $
-                      filter ((`dominates` req1) . fst) $
-                      V.toList known
-        in  V.singleton (req1, newRank)
+updateSAC d known req
+    | length req == 0 = V.empty
+    | length req * length known < optEdge = updateDumb known req
     | otherwise =
         let med = findMed id $ fmap (getCoord . fst) req  -- TODO: try no decorate?
             comparingToMed (p, _) = getCoord p `compare` med
             (knownL, knownM, knownR) = split comparingToMed known
             (reqL, reqM, reqR) = split comparingToMed req
 
-            !_ = trace ("Updating over " ++ show known) ()
+            -- !_ = trace ("Updating over " ++ show known) ()
 
             sortedL = updateSAC d knownL reqL
-            !_ = trace ("update sortedL: " ++ show sortedL) ()
+            -- !_ = trace ("update sortedL: " ++ show sortedL) ()
             sortedM = updateSAC (d - 1) knownM $
                       updateSAC (d - 1) knownL reqM
-            !_ = trace ("update sortedM: " ++ show sortedM) ()
+            -- !_ = trace ("update sortedM: " ++ show sortedM) ()
             sortedR = updateSAC d knownR $
                       updateSAC d (knownL <> knownM) reqR
-            !_ = trace ("update sortedR: " ++ show sortedR) ()
+            -- !_ = trace ("update sortedR: " ++ show sortedR) ()
         in  mconcat [sortedL, sortedM, sortedR]
   where
     getCoord = (V.! (d - 1))
@@ -486,5 +512,5 @@ test seed d n = Q.quickCheckWith args $ Q.forAll (genInput d n) $ \input ->
     args =
         Q.stdArgs
         { Q.replay = fmap (\s -> (Q.mkQCGen s, s)) seed
-        , Q.maxSuccess = 10000
+        , Q.maxSuccess = 1000
         }

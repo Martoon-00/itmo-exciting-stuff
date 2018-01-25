@@ -1,1 +1,1 @@
-stack exec NonDominating
+stack exec NonDominating -- $@
